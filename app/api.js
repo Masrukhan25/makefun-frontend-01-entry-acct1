@@ -1,8 +1,31 @@
-const root='https://make.fun/api/';const memory=new Map(),pending=new Map();
-export let cacheNotice='';
-function stored(path){try{return JSON.parse(sessionStorage.getItem('mf:'+path))}catch{return null}}
-export async function get(path,{refresh=false}={}){const hit=memory.get(path)||stored(path);if(hit&&!refresh&&Date.now()-hit.at<30000)return hit.data;if(pending.has(path))return pending.get(path);const task=(async()=>{try{const headers={Accept:'application/json'};if(hit?.etag)headers['If-None-Match']=hit.etag;let response;for(let attempt=0;attempt<2;attempt++){response=await fetch(root+path,{method:'GET',headers,signal:AbortSignal.timeout(12000)});if(response.status!==503||attempt)break;await new Promise(r=>setTimeout(r,600))}if(response.status===304&&hit){hit.at=Date.now();memory.set(path,hit);return hit.data}if(!response.ok)throw Error(`make.fun returned ${response.status}`);const data=await response.json(),entry={data,etag:response.headers.get('ETag'),at:Date.now()};memory.set(path,entry);try{sessionStorage.setItem('mf:'+path,JSON.stringify(entry))}catch{}cacheNotice='';return data}catch(e){if(hit){cacheNotice='Showing cached data · connection unavailable';return hit.data}throw e}finally{pending.delete(path)}})();pending.set(path,task);return task}
-export const list=()=>get('competitions?status=open&activity=times');
-export const competition=slug=>get('competitions/'+encodeURIComponent(slug));
-export const leaderboard=slug=>get('competitions/'+encodeURIComponent(slug)+'/leaderboard');
-export const profile=handle=>get('profiles/'+encodeURIComponent(handle));
+const origin = 'https://make.fun/api';
+const cache = new Map();
+const pending = new Map();
+export async function fetchJSON(path) {
+  const url = origin + path;
+  if (pending.has(url)) return pending.get(url);
+  const request = (async () => {
+    const saved = cache.get(url);
+    const response = await fetch(url, { method: 'GET', headers: saved?.etag ? { 'If-None-Match': saved.etag } : {}, signal: AbortSignal.timeout(20000) });
+    if (response.status === 304 && saved) return saved.data;
+    if (!response.ok) throw new Error(`make.fun returned ${response.status}. Please try again.`);
+    const data = await response.json();
+    cache.set(url, { etag: response.headers.get('etag'), data });
+    return data;
+  })();
+  pending.set(url, request);
+  try { return await request; } finally { pending.delete(url); }
+}
+export const listCompetitions = () => fetchJSON('/competitions?limit=100');
+export const getCompetition = slug => fetchJSON('/competitions/' + encodeURIComponent(slug));
+export const getLeaderboard = slug => fetchJSON('/competitions/' + encodeURIComponent(slug) + '/leaderboard?limit=1000');
+let profilePath;
+export async function getProfile(handle) {
+  if (!profilePath) {
+    const schema = await fetchJSON('/openapi.json');
+    profilePath = Object.keys(schema.paths || {}).find(path => /\/(agents|profiles)\/\{(handle|username)\}$/.test(path) && schema.paths[path].get);
+    if (!profilePath) profilePath = Object.keys(schema.paths || {}).find(path => /\/(agents|profiles)\/\{[^}]+\}$/.test(path) && schema.paths[path].get);
+    if (!profilePath) throw new Error('The public profile endpoint could not be found in make.fun’s API schema.');
+  }
+  return fetchJSON(profilePath.replace(/^\/api/, '').replace(/\{[^}]+\}/, encodeURIComponent(handle.replace(/^@/, ''))));
+}
